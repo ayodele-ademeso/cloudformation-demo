@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  This is a CloudFormation template for creating an AWS VPC.
+Parameters:
+  Environment:
+    Description: Environment where vpc should be created
+    Type: String
+    Default: "dev"
+    AllowedValues: [dev, test, prod]
+  OwnerTag:
+    Type: String
+    Default: "AyodeleUK"
+    Description: Tag for owner (e.g., YourName, TeamName)
+  VpcName:
+    Description: Name of this VPC
+    Type: String
+    Default: "dev_vpc"
+  VpcCidr:
+    Description: The CIDR block  to use for the VPC.
+    Type: String
+    Default: "10.0.0.0/16"
+  PublicSubnet1CIDR:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: CIDR block for the first public subnet
+  PublicSubnet2CIDR:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: CIDR block for the second public subnet
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: "10.0.3.0/24"
+    Description: CIDR block for the first private subnet
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: "10.0.4.0/24"
+    Description: CIDR block for the second private subnet
+  VpcRegion: 
+    Description: The region to create this VPC in (e.g., us-west-2)
+    Type: String
+    Default: "eu-west-2"
+# Metadata:
+  
+# Mappings:
+  
+# Conditions:
+  
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Join ["-" , [!Ref Environment, "vpc"]]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Sub  "${Environment}_public_subnet1"
+  
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Sub  "${Environment}_public_subnet2"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Sub  "${Environment}_private_subnet1"
+  
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Sub  "${Environment}_private_subnet2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Sub  "${Environment}_public_rtb"
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1 # You can choose any one of your public subnets for the NAT Gateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Name"
+          Value: !Sub  "${Environment}_private_rtb"
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  PublicSubnetAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnetAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateSubnetAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnetAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+Outputs:
+  VpcIdOutput:
+    Description: VPC ID
+    Value: !Ref MyVPC
+    Export:
+      Name:
+        'Fn::Sub': '${AWS::StackName}-vpc'
+
+  PublicSubnet1IdOutput:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name:
+        'Fn::Sub': '${AWS::StackName}-publicsubnet1'
+
+  PublicSubnet2IdOutput:
+    Description: Public Subnet 2 ID
+    Value: !Ref PublicSubnet2
+    Export:
+      Name:
+        'Fn::Sub': '${AWS::StackName}-publicsubnet2'
+
+  PrivateSubnet1IdOutput:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name:
+        'Fn::Sub': '${AWS::StackName}-privatesubnet1'
+
+  PrivateSubnet2IdOutput:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name:
+        'Fn::Sub': '${AWS::StackName}-privatesubnet2'

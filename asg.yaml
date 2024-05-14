@@ -1,0 +1,391 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  This Cloudformation template creates a launch template and an Autoscaling group
+Parameters:
+  Environment:
+    Description: Environment where vpc should be created
+    Type: String
+    Default: "dev"
+    AllowedValues: [dev, test, prod]
+  OwnerTag:
+    Type: String
+    Default: "Ayodele-UK"
+    Description: Tag for owner (e.g., YourName, TeamName)
+  CreatorTag:
+    Type: String
+    Default: "Cloudformation"
+    Description: Tag for owner (e.g., YourName, TeamName)
+  
+Mappings:
+  AmiID:
+    us-east-1: 
+      ImageId: ami-07caf09b362be10b8
+    eu-west-1: 
+      ImageId: ami-0dfdc165e7af15242
+    eu-west-2: 
+      ImageId: ami-04e2dd05a42fb5a50 #This is a custom image which is not available in all regions. Default is 'ami-008ea0202116dbc56'
+  
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyFormat: "pem" #Allowed values: pem | ppk
+      KeyName: !Sub "asg-${Environment}-key"
+      KeyType: "ed25519" #Allowed values: rsa | ed25519 
+      Tags: 
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Managed By"
+          Value: !Ref CreatorTag
+    
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: EC2RolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetAuthorizationToken
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: "*"
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource: "*"
+
+  EC2RoleInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role  # Reference the IAM role you created earlier
+
+
+  LoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group Created for Autoscaling Loadbalancer" # Required
+      GroupName: "asg-lb-sg"
+      SecurityGroupIngress: 
+        - CidrIp: "0.0.0.0/0"
+          Description: "Allow traffic from  anywhere to port 80."
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      Tags: 
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Managed By"
+          Value: !Ref CreatorTag
+      VpcId: !ImportValue 'ayodele-vpc-stack-vpc'
+
+  EC2InstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group created for Autoscaling Instances" # Required
+      GroupName: "asg-instances-sg"
+      SecurityGroupIngress: 
+        - Description: "Allow HTTP traffic."
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+          SourceSecurityGroupId:  !GetAtt LoadBalancerSG.GroupId
+        - Description: "Allow  SSH traffic."
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+          CidrIp: "0.0.0.0/0"
+      Tags: 
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Managed By"
+          Value: !Ref CreatorTag
+      VpcId: !ImportValue 'ayodele-vpc-stack-vpc'
+
+#ToDo: Add ingress rule for ssh
+
+  AutoScalingLaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-lt"
+      LaunchTemplateData:
+        ImageId: !FindInMap  [AmiID, !Ref "AWS::Region", ImageId]
+        InstanceType: t3.micro
+        BlockDeviceMappings: 
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp2 #Allowed values: standard | io1 | io2 | gp2 | sc1 | st1 | gp3
+            DeleteOnTermination: true
+            Encrypted: false
+        EbsOptimized: true
+        IamInstanceProfile: 
+          Name: !Ref EC2RoleInstanceProfile
+        KeyName: !Ref KeyPair
+        MetadataOptions: 
+            HttpEndpoint: enabled #Allowed values: disabled | enabled
+            HttpProtocolIpv6: disabled #Allowed values: disabled | enabled
+            HttpTokens: optional #Allowed values: optional | required
+            InstanceMetadataTags: enabled #Allowed values: disabled | enabled
+        SecurityGroupIds: 
+          - !GetAtt EC2InstanceSG.GroupId
+        TagSpecifications:
+          - ResourceType: "instance"
+            Tags:
+              - Key: "Name"
+                Value: !Sub "${AWS::StackName}-JenkinsServer"
+        # UserData: !Base64 |
+        #   #!/bin/bash
+        #   set -e
+
+        #   LOG_FILE="/var/log/userdata.log"
+
+        #   # Function to log and display messages
+        #   log_and_display() {
+        #       echo "$(date): $1" | tee -a "$LOG_FILE"
+        #   }
+
+        #   log_and_display "Updating the OS"
+        #   sudo yum update -y | tee -a "$LOG_FILE"
+
+        #   log_and_display "Installing Java (required for Jenkins)" #change this command to what fits the os you are installing on
+        #   sudo yum install java-21-amazon-corretto-headless -y | tee -a "$LOG_FILE"
+
+        #   log_and_display "Installing Jenkins"
+        #   sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat/jenkins.repo | tee -a "$LOG_FILE"
+        #   sudo rpm --import https://pkg.jenkins.io/redhat/jenkins.io-2023.key | tee -a "$LOG_FILE"
+
+        #   sudo yum install jenkins -y | tee -a "$LOG_FILE"
+
+        #   log_and_display "Starting Jenkins service"
+        #   sudo systemctl enable jenkins | tee -a "$LOG_FILE"
+        #   sudo systemctl start jenkins | tee -a "$LOG_FILE"
+
+        #   log_and_display "Installing Nginx"
+        #   sudo yum install nginx -y | tee -a "$LOG_FILE"
+
+        #   log_and_display "Starting Nginx service"
+        #   sudo systemctl enable nginx | tee -a "$LOG_FILE"
+        #   sudo systemctl start nginx | tee -a "$LOG_FILE"
+
+        #   log_and_display "Configuring Nginx as a reverse proxy for Jenkins"
+        #   sudo tee /etc/nginx/conf.d/jenkins.conf <<\EOF
+        #   upstream jenkins {
+        #     keepalive 32; # keepalive connections
+        #     server 127.0.0.1:8080; # jenkins ip and port
+        #   }
+
+        #   # Required for Jenkins websocket agents
+        #   map $http_upgrade $connection_upgrade {
+        #     default upgrade;
+        #     '' close;
+        #   }
+
+        #   server {
+        #     listen          80;
+
+        #     server_name     _;
+
+        #     # this is the jenkins web root directory
+        #     # (mentioned in the output of "systemctl cat jenkins")
+        #     root            /var/run/jenkins/war/;
+
+        #     access_log      /var/log/nginx/jenkins.access.log;
+        #     error_log       /var/log/nginx/jenkins.error.log;
+
+        #     # pass through headers from Jenkins that Nginx considers invalid
+        #     ignore_invalid_headers off;
+
+        #     location ~ "^/static/[0-9a-fA-F]{8}\/(.*)$" {
+        #       # rewrite all static files into requests to the root
+        #       # E.g /static/12345678/css/something.css will become /css/something.css
+        #       rewrite "^/static/[0-9a-fA-F]{8}\/(.*)" /$1 last;
+        #     }
+
+        #     location /userContent {
+        #       # have nginx handle all the static requests to userContent folder
+        #       # note : This is the $JENKINS_HOME dir
+        #       root /var/lib/jenkins/;
+        #       if (!-f $request_filename){
+        #         # this file does not exist, might be a directory or a /**view** url
+        #         rewrite (.*) /$1 last;
+        #         break;
+        #       }
+        #       sendfile on;
+        #     }
+
+        #     location / {
+        #         sendfile off;
+        #         proxy_pass         http://jenkins;
+        #         proxy_redirect     default;
+        #         proxy_http_version 1.1;
+
+        #         # Required for Jenkins websocket agents
+        #         proxy_set_header   Connection        $connection_upgrade;
+        #         proxy_set_header   Upgrade           $http_upgrade;
+
+        #         proxy_set_header   Host              $http_host;
+        #         proxy_set_header   X-Real-IP         $remote_addr;
+        #         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        #         proxy_set_header   X-Forwarded-Proto $scheme;
+        #         proxy_max_temp_file_size 0;
+
+        #         #this is the maximum upload size
+        #         client_max_body_size       10m;
+        #         client_body_buffer_size    128k;
+
+        #         proxy_connect_timeout      90;
+        #         proxy_send_timeout         90;
+        #         proxy_read_timeout         90;
+        #         proxy_request_buffering    off; # Required for HTTP CLI commands
+        #     }
+
+        #   }
+        #   EOF
+
+
+        #   log_and_display "Reloading Nginx to apply the configuration"
+        #   sudo systemctl reload nginx | tee -a "$LOG_FILE"
+
+        #   usermod -aG jenkins nginx | tee -a "$LOG_FILE"
+
+        #   log_and_display "Installation and configuration completed"
+
+  HTTPlistener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - Type: "forward"
+          TargetGroupArn: !Ref AlbTargetGroup
+      LoadBalancerArn: !Ref AsgLoadBalancer
+      Port: 80
+      Protocol: "HTTP"
+
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: "/"
+      HealthCheckProtocol: "HTTP"
+      HealthCheckTimeoutSeconds: 60
+      HealthyThresholdCount: 2
+      IpAddressType: "ipv4" #Allowed values: ipv4 | ipv6
+      Matcher:
+        HttpCode: "200-499"
+      Name: "ASGTargetGroup-tg"
+      Port: 80
+      Protocol: "HTTP"
+      Tags: 
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Managed By"
+          Value: !Ref CreatorTag
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+      UnhealthyThresholdCount: 5
+      VpcId: !ImportValue 'ayodele-vpc-stack-vpc'
+
+  AsgLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4 #Allowed values: ipv4 | dualstack
+      Name: ayodele-cfn-lb
+      Scheme: internet-facing #Allowed values: internet-facing | internal
+      SecurityGroups: 
+        - !GetAtt LoadBalancerSG.GroupId
+      Subnets: 
+        - !ImportValue 'ayodele-vpc-stack-publicsubnet1'
+        - !ImportValue 'ayodele-vpc-stack-publicsubnet2'
+      Tags: 
+        - Key: "Environment"
+          Value: !Ref Environment
+        - Key: "Owner"
+          Value: !Ref OwnerTag
+        - Key: "Managed By"
+          Value: !Ref CreatorTag
+      Type: application #Allowed values: application | network | gateway
+
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: AsgLoadBalancer
+    Properties:
+      AutoScalingGroupName: "cfn-demo-asg"
+      DesiredCapacity: 2
+      InstanceMaintenancePolicy:
+        MaxHealthyPercentage: 200
+        MinHealthyPercentage: 100
+      LaunchTemplate:
+        LaunchTemplateId: !GetAtt AutoScalingLaunchTemplate.LaunchTemplateId
+        Version: !GetAtt AutoScalingLaunchTemplate.LatestVersionNumber
+      MaxSize: 3 # Required
+      MinSize: 1 # Required
+      NewInstancesProtectedFromScaleIn: false
+      VPCZoneIdentifier:
+          - !ImportValue 'ayodele-vpc-stack-publicsubnet1'
+          - !ImportValue 'ayodele-vpc-stack-publicsubnet2'
+      TargetGroupARNs: 
+        - !Ref AlbTargetGroup
+      Tags: 
+        - Key: "Environment"
+          PropagateAtLaunch: true
+          Value: !Ref Environment
+        - Key: "Owner"
+          PropagateAtLaunch: true
+          Value: !Ref OwnerTag
+        - Key: "ManagedBy"
+          PropagateAtLaunch: true
+          Value: !Ref CreatorTag
+
+Outputs:
+  LaunchTemplateARN:
+    Value: !GetAtt AutoScalingLaunchTemplate.LaunchTemplateId
+  LoadBalancerDNS:
+    Value: !GetAtt AsgLoadBalancer.DNSName
+  LoadBalancerZoneID:
+    Value: !GetAtt AsgLoadBalancer.CanonicalHostedZoneID
+  LoadBalancerName:
+    Value: !GetAtt AsgLoadBalancer.LoadBalancerFullName
