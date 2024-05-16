@@ -7,6 +7,11 @@ Parameters:
     Type: String
     Default: "dev"
     AllowedValues: [dev, test, prod]
+    ConstraintDescription: "Must be either dev, test or prod"
+  InstanceType:
+    Description: Instance type to use in launch template
+    Type: String
+    Default: "t3.micro"
   OwnerTag:
     Type: String
     Default: "Ayodele-UK"
@@ -14,7 +19,22 @@ Parameters:
   CreatorTag:
     Type: String
     Default: "Cloudformation"
-    Description: Tag for owner (e.g., YourName, TeamName)
+    Description: Tag for resources managed by cloudformation
+  EC2KeyFormat:
+    Type: String
+    Default: "pem"
+    Description: EC2 Keypair Format
+    AllowedValues: [pem, ppk] #ppk is for windows
+  EC2KeyType:
+    Type: String
+    Default: "ed25519"
+    Description: EC2 Keypair Type
+    AllowedValues: [rsa, ed25519]
+
+Conditions:
+  IsDev: !Equals [!Ref Environment, "dev"]
+  IsTest: !Equals [!Ref Environment, "test"]
+  IsProd: !Equals [!Ref Environment, "prod"]
   
 Mappings:
   AmiID:
@@ -29,9 +49,9 @@ Resources:
   KeyPair:
     Type: AWS::EC2::KeyPair
     Properties:
-      KeyFormat: "pem" #Allowed values: pem | ppk
+      KeyFormat: !Ref EC2KeyFormat
       KeyName: !Sub "asg-${Environment}-key"
-      KeyType: "ed25519" #Allowed values: rsa | ed25519 
+      KeyType: !Ref EC2KeyType
       Tags: 
         - Key: "Environment"
           Value: !Ref Environment
@@ -149,11 +169,18 @@ Resources:
       LaunchTemplateName: !Sub "${AWS::StackName}-lt"
       LaunchTemplateData:
         ImageId: !FindInMap  [AmiID, !Ref "AWS::Region", ImageId]
-        InstanceType: t3.micro
+        InstanceType:
+          Fn::If:
+          - IsDev
+          - !Ref InstanceType
+          - Fn::If:
+            - IsProd
+            - "t3.large"
+            - "t3.medium"
         BlockDeviceMappings: 
         - DeviceName: /dev/xvda
           Ebs:
-            VolumeSize: 50
+            VolumeSize: !If [IsDev, 50, !If [IsProd, 100, 70]]
             VolumeType: gp2 #Allowed values: standard | io1 | io2 | gp2 | sc1 | st1 | gp3
             DeleteOnTermination: true
             Encrypted: false
@@ -354,7 +381,7 @@ Resources:
     DependsOn: AsgLoadBalancer
     Properties:
       AutoScalingGroupName: "cfn-demo-asg"
-      DesiredCapacity: 2
+      DesiredCapacity: !If [IsProd, 2, 1]
       InstanceMaintenancePolicy:
         MaxHealthyPercentage: 200
         MinHealthyPercentage: 100
